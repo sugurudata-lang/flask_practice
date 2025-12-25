@@ -1,26 +1,81 @@
 from datetime import datetime
 
-from flask import Flask, render_template, request
+from flask import Flask, render_template, request, redirect, url_for
+from flask_sqlalchemy import SQLAlchemy 
+# Flask-Loginのインポート --- (※1)
+from flask_login import LoginManager, UserMixin, login_user, current_user, logout_user
+from werkzeug.security import generate_password_hash, check_password_hash
+import os
 
 
-# 掲示板の一つ一つのメッセージを示すクラス
-class Message:
-    # コンストラクタ
-    def __init__(self, id: str, user_name: str, contents: str):
-        self.id = id
-        self.user_name = user_name
-        self.contents = contents
-
-
-# グローバル変数の宣言
 app: Flask = Flask(__name__)
-login_user_name: str = "osamu"
-message_list: list[Message] = [
-    Message("202400502102310", "osamu", "朝からビールですか！楽しみです。"),
-    Message("202400502100223", "noriko", "こちらこそ！次回はABコースで！"),
-    Message("202400502092101", "osamu", "昨日はHBコース楽しかったです！"),
-]
 
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///db.sqlite'
+db = SQLAlchemy(app)
+
+
+# ログインマネージャーの設定 --- (※2)
+app.config['SECRET_KEY'] = os.urandom(24)
+login_manager = LoginManager()
+login_manager.init_app(app)
+
+# ユーザーモデルの作成 --- (※3)
+class User(UserMixin, db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(50), nullable=False, unique=True)
+    password = db.Column(db.String(25))
+
+class Message(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_name = db.Column(db.String(100))
+    contents = db.Column(db.String(100))
+
+
+# ユーザーを読み込むためのコールバック --- (※4)
+@login_manager.user_loader
+def load_user(user_id):
+    return User.query.get(int(user_id))
+
+# ログインユーザー名を保持する変数 --- (※5)
+@app.before_request
+def set_login_user_name():
+    global login_user_name
+    login_user_name = current_user.username if current_user.is_authenticated else None
+
+@app.route('/signup', methods=['GET', 'POST'])
+def signup():
+    if request.method == "GET":
+        return render_template("signup.html")
+    
+    elif request.method == "POST":
+        username = request.form.get('username')
+        password = request.form.get('password')
+        #Userのインスタンスを作成
+        user = User(username=username, password=generate_password_hash(password))
+
+        db.session.add(user)
+        db.session.commit()
+        return redirect('login')
+
+#ログイン
+@app.route('/login', methods=['GET','POST'])
+def login():
+    if request.method == "GET":
+        return render_template("login.html")
+    elif request.method == "POST":
+        username = request.form.get('username')
+        password = request.form.get('password')
+        #Userテーブルからusernameに一致するユーザを取得
+        user = User.query.filter_by(username=username).first()
+        if check_password_hash(user.password, password):
+            login_user(user)
+            return redirect('/')
+        
+#ログアウト
+@app.logout('/logout')
+def logout():
+    logout_user()
+    return redirect('/')
 
 # 「/」にアクセスがあった場合のルーティング
 @app.route("/")
@@ -30,21 +85,16 @@ def index():
 
     # search_wordパラメータの有無
     if search_word is None:
-        # search_wordパラメータが存在しない場合は、すべてのメッセージを「top.html」に表示
-        return render_template(
-            "top.html", login_user_name=login_user_name, message_list=message_list
-        )
+            message_list: list[Message] = Message.query.all()
     else:
-        # search_wordパラメータが存在する場合は、検索ワードでフィルタしたメッセージを「top.html」に表示
-        filtered_message_list: list[Message] = [
-            x for x in message_list if search_word in x.contents
-        ]
-        return render_template(
-            "top.html",
-            login_user_name=login_user_name,
-            message_list=filtered_message_list,
-            search_word=search_word,
-        )
+            message_list: list[Message] = Message.query.filter(Message.contents.like(f"%{search_word}%")).all()
+
+    return render_template(
+        "top.html",
+        login_user_name=login_user_name,
+        message_list=message_list,
+        search_word=search_word,
+    )
 
 
 # 「/write」にアクセスがあった場合のルーティング
@@ -57,18 +107,26 @@ def write():
 
     # POSTメソッドの場合
     elif request.method == "POST":
-        # POSTメソッドのフォームの値を利用し、
-        # 新しい「Message」クラスインスタンスを生成 ---（※３）
-        id: str = datetime.now().strftime("%Y%m%d%H%M%S")
         contents: str = request.form.get("contents")
         user_name: str = request.form.get("user_name")
-        # 「message_list」に追加して、「top.html」の表示
-        if contents:
-            message_list.insert(0, Message(id, user_name, contents))
-        return render_template(
-            "top.html", login_user_name=login_user_name, message_list=message_list
-        )
+        new_message  = Message(user_name=user_name, conetnts=contents)
+        db.session.add(new_message)
+        db.session.commit()
 
+        return render_template(url_for("index.html"))
 
+@app.route("/update/<int:message_id>", methods=["GET", "POST"])
+def update(message_id: int):
+    message: Message = Message.query.get(message_id)
+
+    if request.method == "GET":
+        return render_template('update.html', login_user_name=login_user_name, message=message)
+    elif request.method == "POST":
+        message.contents = request.form.get("contents")
+        db.seesion.commit()
+
+        return redirect(url_for("index"))
+    
+@app.delite("/delite/<int:message_id>")
 if __name__ == "__main__":
     app.run(debug=True, port = 3000)
